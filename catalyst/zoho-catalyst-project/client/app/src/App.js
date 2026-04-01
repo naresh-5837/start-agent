@@ -1,0 +1,422 @@
+import React, { useState, useRef, useEffect, useCallback } from "react";
+
+const MODEL_FAST = "claude-haiku-4-5-20251001";
+const MODEL_SMART = "claude-sonnet-4-20250514";
+
+const SYSTEM_EDUCATION = `You are the Zoho Start Business Formation Assistant. Answer questions about LLCs, business formation, EINs, registered agents, etc. Be concise (2-3 paragraphs max), warm, and helpful.
+
+Key facts:
+- LLC = Limited Liability Company. Protects personal assets. Pass-through taxation.
+- Needs: Articles of Organization, Operating Agreement (recommended), Registered Agent, EIN.
+- Why LLC? Asset protection, tax flexibility, credibility, simplicity, management flexibility.
+- EIN = Employer Identification Number (9-digit, from IRS). For bank accounts, hiring, taxes.
+- Registered Agent = person/company in formation state accepting legal docs. No P.O. Box. Required.
+- NAICS = North American Industry Classification System code for your business sector.
+- Zoho Start: $0 starter plan + state filing fee. EIN add-on $49. US only. Integrates with Zoho Voice & Domains.
+- Popular states: Home state (simplest), Delaware (business-friendly), Wyoming (no income tax), Nevada (privacy).
+- Operating Agreement: internal doc outlining management, profit splits, responsibilities. Recommended.
+- Articles of Organization: primary legal doc filed with state to create LLC.
+- You're NOT a lawyer — mention this when discussing legal specifics.
+
+If the user wants to start registration, tell them to click "I'd like to register my LLC" or just say so.`;
+
+const SYSTEM_REGISTRATION = `You are the Zoho Start registration assistant collecting LLC formation info through chat. Be brief, warm, and efficient. Ask 2-4 related fields per message.
+
+### Collection order:
+1. **Start**: Formation state + confirm LLC.
+2. **Contact**: First/Last Name, Email, Phone. Then address (street1, street2 optional, city, state, zip).
+3. **Company**: LLC name, suffix (LLC/L.L.C./Limited Liability Company/L.C./Ltd. Co./Ltd Company/Limited Company), industry (suggest NAICS code), brief description.
+4. **Company Address**: ASK to reuse contact address. If no, collect street1, street2, city, state, zip, county.
+5. **Members**: How many? Each: Individual/Company, name, contact, ownership%, over-18 confirm. ASK to reuse contact info for member 1. Total must = 100%.
+6. **Registered Agent**: Briefly explain (person/company in formation state to accept legal docs). Individual/Company, name, address (must be in formation state). ASK reuse. Get consent confirmation.
+7. **EIN**: Zoho ($49) or self? If Zoho: legal name (ASK reuse), SSN or ITIN (remind: handled securely), mailing address (ASK reuse), 5 yes/no questions (heavy vehicle 55k+lbs, gambling, Form 720, alcohol/tobacco/firearms, W-2 employees in next 12 months), authorization confirm. Mask SSN in summary as ***-**-XXXX.
+8. **Review**: Show complete summary. Ask to confirm.
+
+### Rules:
+- Check conversation history — NEVER re-ask what the user already provided.
+- ASK before reusing info: "Want to use the same [name/address] from earlier?"
+- Keep responses SHORT: confirm what you got → ask next questions. No long explanations.
+- If ownership doesn't total 100%, ask to correct.
+- When user confirms final summary, end with EXACTLY on its own line:
+<<<REGISTRATION_COMPLETE>>>`;
+
+const REG_PHRASES = ["register","form my llc","start my llc","form an llc","i'd like to register","let's start","begin registration","i want to start","i want to form","start registration","ready to register","sign up","let's do it","proceed with registration"];
+
+function isRegistrationMode(messages) {
+  const text = messages.map(m => m.content).join("\n").toLowerCase();
+  return REG_PHRASES.some(p => text.includes(p));
+}
+
+const WELCOME_MSG = {
+  role: "assistant",
+  content: `Welcome to the **Zoho Start Business Guide!** I'm here to help you start your LLC.\n\n→ **Learn about LLCs** — what they are, why you need one, costs, states, and more\n→ **Register your LLC** — I'll collect your info step by step through this chat\n\nAsk me anything, or say **"I'd like to register my LLC"** to get started!`
+};
+
+const QUICK_PROMPTS = [
+  "What is an LLC and why do I need one?",
+  "Which state should I form my LLC in?",
+  "How much does it cost?",
+  "I'd like to register my LLC",
+];
+
+/* ── Styles ── */
+const styles = {
+  app: {
+    fontFamily: "'Outfit', sans-serif",
+    height: "100vh",
+    display: "flex",
+    flexDirection: "column",
+    background: "#F8F7FC",
+    overflow: "hidden",
+  },
+  header: {
+    padding: "12px 20px",
+    background: "#fff",
+    borderBottom: "1px solid #EEEDF2",
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    flexShrink: 0,
+  },
+  logo: {
+    width: 40, height: 40, borderRadius: 12,
+    background: "linear-gradient(135deg,#6C63FF 0%,#8B83FF 50%,#A78BFA 100%)",
+    backgroundSize: "200% 200%",
+    animation: "gradShift 6s ease infinite",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    boxShadow: "0 3px 10px rgba(108,99,255,0.18)",
+  },
+  chatArea: { flex: 1, overflowY: "auto", padding: "20px 20px 10px" },
+  inputArea: {
+    padding: "10px 20px 16px",
+    background: "#fff",
+    borderTop: "1px solid #EEEDF2",
+    flexShrink: 0,
+  },
+};
+
+/* ── Components ── */
+
+function TypingDots() {
+  return (
+    <div style={{ display: "flex", gap: 5, padding: "10px 0", alignItems: "center" }}>
+      {[0, 1, 2].map(i => (
+        <div key={i} style={{
+          width: 7, height: 7, borderRadius: "50%", background: "#6C63FF",
+          animation: `pulse3 1.4s infinite ease-in-out both`,
+          animationDelay: `${i * 0.16}s`,
+        }} />
+      ))}
+    </div>
+  );
+}
+
+function formatMsg(text) {
+  let c = text.replace(/<<<REGISTRATION_COMPLETE>>>/g, "").trim();
+  let h = c.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" style="color:#6C63FF;text-decoration:underline;">$1</a>');
+  h = h.replace(/^→ /gm, '<span style="color:#6C63FF;margin-right:4px;">→</span>');
+  h = h.replace(/^(\d+)\.\s/gm, '<span style="color:#6C63FF;font-weight:600;margin-right:2px;">$1.</span> ');
+  h = h.replace(/\n/g, '<br/>');
+  return h;
+}
+
+function ChatBubble({ msg, isLast }) {
+  const isUser = msg.role === "user";
+  return (
+    <div style={{
+      display: "flex", justifyContent: isUser ? "flex-end" : "flex-start",
+      marginBottom: 14, animation: isLast ? "fadeUp 0.25s ease-out" : "none",
+    }}>
+      {!isUser && (
+        <div style={{
+          width: 32, height: 32, borderRadius: 10, marginRight: 10, marginTop: 2, flexShrink: 0,
+          background: "linear-gradient(135deg,#6C63FF,#8B83FF)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 13, color: "#fff", fontWeight: 700,
+          boxShadow: "0 2px 6px rgba(108,99,255,0.18)",
+        }}>Z</div>
+      )}
+      <div style={{
+        maxWidth: "80%", padding: "12px 16px", fontSize: 14, lineHeight: 1.65,
+        borderRadius: isUser ? "18px 18px 4px 18px" : "18px 18px 18px 4px",
+        background: isUser ? "linear-gradient(135deg,#6C63FF,#8B83FF)" : "#fff",
+        color: isUser ? "#fff" : "#2D2B3D",
+        boxShadow: isUser ? "0 2px 8px rgba(108,99,255,0.16)" : "0 1px 4px rgba(0,0,0,0.05)",
+        fontFamily: "'Outfit',sans-serif",
+      }} dangerouslySetInnerHTML={{ __html: formatMsg(msg.content) }} />
+    </div>
+  );
+}
+
+function ModelBadge({ model }) {
+  const isHaiku = model === MODEL_FAST;
+  return (
+    <span style={{
+      padding: "3px 8px", borderRadius: 5, fontSize: 10, fontWeight: 600,
+      fontFamily: "'Outfit',sans-serif", letterSpacing: "0.03em",
+      background: isHaiku ? "#ECFDF5" : "#EDE9FE",
+      color: isHaiku ? "#059669" : "#6C63FF",
+    }}>
+      {isHaiku ? "⚡ HAIKU" : "🧠 SONNET"}
+    </span>
+  );
+}
+
+function SubmitBanner({ onSubmit, submitted }) {
+  if (submitted) {
+    return (
+      <div style={{
+        margin: "12px 0 14px", padding: 24,
+        background: "linear-gradient(135deg,#ECFDF5,#D1FAE5)",
+        borderRadius: 14, textAlign: "center",
+        animation: "popIn 0.4s ease-out", border: "1px solid #A7F3D0",
+      }}>
+        <div style={{ fontSize: 40, marginBottom: 8 }}>🎉</div>
+        <div style={{ fontFamily: "'Newsreader',serif", fontSize: 20, fontWeight: 600, color: "#065F46", marginBottom: 6 }}>
+          Application Submitted Successfully!
+        </div>
+        <div style={{ fontSize: 13, color: "#047857", lineHeight: 1.6 }}>
+          Your LLC formation request has been sent to the Zoho Start team.<br />
+          You'll receive email updates on your application status.
+        </div>
+        <a href="https://www.zoho.com/start/" target="_blank" rel="noopener noreferrer"
+          style={{
+            display: "inline-block", marginTop: 14, padding: "10px 24px",
+            background: "#059669", color: "#fff", borderRadius: 10,
+            fontSize: 13, fontWeight: 600, textDecoration: "none", fontFamily: "'Outfit',sans-serif",
+          }}>Visit Zoho Start Dashboard →</a>
+      </div>
+    );
+  }
+  return (
+    <div style={{
+      margin: "12px 0 14px", padding: 20,
+      background: "linear-gradient(135deg,#F5F3FF,#EDE9FE)",
+      borderRadius: 14, textAlign: "center",
+      animation: "popIn 0.4s ease-out", border: "1px solid #DDD6FE",
+    }}>
+      <div style={{ fontSize: 28, marginBottom: 6 }}>📋</div>
+      <div style={{ fontFamily: "'Newsreader',serif", fontSize: 18, fontWeight: 600, color: "#4338CA", marginBottom: 6 }}>
+        Ready to Submit Your Application
+      </div>
+      <div style={{ fontSize: 13, color: "#6B7280", marginBottom: 14, lineHeight: 1.5 }}>
+        All information collected. Click below to send your LLC formation request to the Zoho Start team.
+      </div>
+      <button onClick={onSubmit} style={{
+        padding: "12px 32px", borderRadius: 10,
+        background: "linear-gradient(135deg,#6C63FF,#8B83FF)",
+        color: "#fff", border: "none", cursor: "pointer",
+        fontSize: 15, fontWeight: 600, fontFamily: "'Outfit',sans-serif",
+        boxShadow: "0 4px 14px rgba(108,99,255,0.3)", transition: "all 0.2s",
+      }}
+        onMouseEnter={e => { e.target.style.transform = "translateY(-1px)"; }}
+        onMouseLeave={e => { e.target.style.transform = "translateY(0)"; }}
+      >✓ Submit to Zoho Start</button>
+    </div>
+  );
+}
+
+/* ── Main App ── */
+
+function App() {
+  const [messages, setMessages] = useState([WELCOME_MSG]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [showPrompts, setShowPrompts] = useState(true);
+  const [regComplete, setRegComplete] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [lastModel, setLastModel] = useState(null);
+  const chatEndRef = useRef(null);
+  const inputRef = useRef(null);
+
+  const scrollToBottom = useCallback(() => {
+    setTimeout(() => {
+      if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }, 50);
+  }, []);
+
+  useEffect(() => { scrollToBottom(); }, [messages, loading, regComplete, submitted, scrollToBottom]);
+
+  const sendMessage = async (text) => {
+    const userMsg = { role: "user", content: text };
+    const allMessages = [...messages, userMsg];
+    setMessages(allMessages);
+    setInput("");
+    setShowPrompts(false);
+    setLoading(true);
+
+    try {
+      const registering = isRegistrationMode(allMessages);
+      const model = registering ? MODEL_FAST : MODEL_SMART;
+      const systemPrompt = registering ? SYSTEM_REGISTRATION : SYSTEM_EDUCATION;
+      setLastModel(model);
+
+      const apiMessages = allMessages.map(m => ({ role: m.role, content: m.content }));
+
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model,
+          max_tokens: registering ? 600 : 800,
+          system: systemPrompt,
+          messages: apiMessages,
+        }),
+      });
+
+      const data = await response.json();
+      const reply = (data.content && data.content.filter(b => b.type === "text").map(b => b.text).join("\n"))
+        || "Sorry, something went wrong. Could you try again?";
+
+      if (reply.includes("<<<REGISTRATION_COMPLETE>>>")) {
+        setRegComplete(true);
+      }
+
+      setMessages(prev => [...prev, { role: "assistant", content: reply }]);
+    } catch (err) {
+      console.error("API error:", err);
+      setMessages(prev => [...prev, {
+        role: "assistant",
+        content: "Oops — I ran into an error. Could you try that again?"
+      }]);
+    } finally {
+      setLoading(false);
+      if (inputRef.current) inputRef.current.focus();
+    }
+  };
+
+  const handleSubmit = (e) => {
+    if (e) e.preventDefault();
+    if (!input.trim() || loading) return;
+    sendMessage(input.trim());
+  };
+
+  return (
+    <div style={styles.app}>
+      {/* Global CSS */}
+      <style>{`
+        @keyframes fadeUp { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+        @keyframes pulse3 { 0%,80%,100% { transform:scale(0); } 40% { transform:scale(1); } }
+        @keyframes popIn { 0% { opacity:0; transform:scale(0.9); } 100% { opacity:1; transform:scale(1); } }
+        @keyframes gradShift { 0% { background-position:0% 50%; } 50% { background-position:100% 50%; } 100% { background-position:0% 50%; } }
+        ::-webkit-scrollbar { width:5px; }
+        ::-webkit-scrollbar-thumb { background:#C7C4D4; border-radius:10px; }
+        ::-webkit-scrollbar-track { background:transparent; }
+        input::placeholder { color:#A0A0B0; }
+      `}</style>
+
+      {/* Header */}
+      <div style={styles.header}>
+        <div style={styles.logo}>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontFamily: "'Newsreader',serif", fontSize: 17, fontWeight: 600, color: "#2D2B3D" }}>Zoho Start</div>
+          <div style={{ fontSize: 11.5, color: "#A0A0B0", display: "flex", alignItems: "center", gap: 5 }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#34D399", display: "inline-block" }} />
+            LLC Formation Assistant
+          </div>
+        </div>
+        {lastModel && <ModelBadge model={lastModel} />}
+        <a href="https://www.zoho.com/start/" target="_blank" rel="noopener noreferrer"
+          style={{
+            padding: "8px 16px", background: "#6C63FF", color: "#fff",
+            borderRadius: 9, fontSize: 12.5, fontWeight: 600, textDecoration: "none",
+            fontFamily: "'Outfit',sans-serif", boxShadow: "0 2px 6px rgba(108,99,255,0.16)",
+          }}>zoho.com/start ↗</a>
+      </div>
+
+      {/* Chat */}
+      <div style={styles.chatArea}>
+        {messages.map((msg, i) => (
+          <ChatBubble key={i} msg={msg} isLast={i === messages.length - 1} />
+        ))}
+        {loading && (
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 14 }}>
+            <div style={{
+              width: 32, height: 32, borderRadius: 10,
+              background: "linear-gradient(135deg,#6C63FF,#8B83FF)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              flexShrink: 0, fontSize: 13, color: "#fff", fontWeight: 700,
+              boxShadow: "0 2px 6px rgba(108,99,255,0.18)",
+            }}>Z</div>
+            <div style={{
+              padding: "12px 16px", borderRadius: "18px 18px 18px 4px",
+              background: "#fff", boxShadow: "0 1px 4px rgba(0,0,0,0.05)",
+            }}><TypingDots /></div>
+          </div>
+        )}
+        {regComplete && (
+          <SubmitBanner onSubmit={() => { setSubmitted(true); console.log("Submitted:", messages); }} submitted={submitted} />
+        )}
+        <div ref={chatEndRef} />
+      </div>
+
+      {/* Quick Prompts */}
+      {showPrompts && (
+        <div style={{ padding: "0 20px 8px", display: "flex", flexWrap: "wrap", gap: 7, animation: "fadeUp 0.4s ease-out" }}>
+          {QUICK_PROMPTS.map((p, i) => (
+            <button key={i} onClick={() => sendMessage(p)}
+              style={{
+                padding: "9px 14px", borderRadius: 20,
+                border: "1.5px solid #EEEDF2", background: "#fff",
+                color: "#2D2B3D", fontSize: 12.5, fontWeight: 500,
+                cursor: "pointer", fontFamily: "'Outfit',sans-serif",
+                transition: "all 0.2s", whiteSpace: "nowrap",
+              }}
+              onMouseEnter={e => { e.target.style.borderColor = "#6C63FF"; e.target.style.color = "#6C63FF"; e.target.style.background = "#F5F3FF"; }}
+              onMouseLeave={e => { e.target.style.borderColor = "#EEEDF2"; e.target.style.color = "#2D2B3D"; e.target.style.background = "#fff"; }}
+            >{p}</button>
+          ))}
+        </div>
+      )}
+
+      {/* Input */}
+      <div style={styles.inputArea}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input
+            ref={inputRef}
+            type="text"
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") handleSubmit(); }}
+            placeholder={
+              submitted ? "Application submitted! Ask me anything else..."
+                : regComplete ? "Review above and submit, or ask anything..."
+                : "Type your message..."
+            }
+            disabled={loading}
+            style={{
+              flex: 1, padding: "12px 16px", borderRadius: 12,
+              border: "1.5px solid #EEEDF2", fontSize: 14,
+              fontFamily: "'Outfit',sans-serif", color: "#2D2B3D",
+              outline: "none", background: "#FAFAFE",
+            }}
+            onFocus={e => { e.target.style.borderColor = "#6C63FF"; e.target.style.background = "#fff"; e.target.style.boxShadow = "0 0 0 3px rgba(108,99,255,0.08)"; }}
+            onBlur={e => { e.target.style.borderColor = "#EEEDF2"; e.target.style.background = "#FAFAFE"; e.target.style.boxShadow = "none"; }}
+          />
+          <button onClick={handleSubmit} disabled={loading || !input.trim()}
+            style={{
+              width: 44, height: 44, borderRadius: 12, border: "none",
+              background: (!input.trim() || loading) ? "#E5E4EB" : "linear-gradient(135deg,#6C63FF,#8B83FF)",
+              color: "#fff", cursor: (!input.trim() || loading) ? "not-allowed" : "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+              boxShadow: (!input.trim() || loading) ? "none" : "0 2px 8px rgba(108,99,255,0.18)",
+            }}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+              <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </div>
+        <div style={{ textAlign: "center", marginTop: 9, fontSize: 10.5, color: "#B0AFBC" }}>
+          Powered by Claude · General guidance only — not legal advice · <a href="https://www.zoho.com/start/" target="_blank" rel="noopener noreferrer" style={{ color: "#6C63FF", textDecoration: "none" }}>zoho.com/start</a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default App;
