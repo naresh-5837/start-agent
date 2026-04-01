@@ -65,12 +65,13 @@ const QUICK_PROMPTS = [
 ];
 
 const globalCSS = `
-@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&display=swap');
 @keyframes fadeUp { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
 @keyframes pulse3 { 0%,80%,100% { transform:scale(0); } 40% { transform:scale(1); } }
 @keyframes popIn { 0% { opacity:0; transform:scale(0.9); } 100% { opacity:1; transform:scale(1); } }
 @keyframes gradShift { 0% { background-position:0% 50%; } 50% { background-position:100% 50%; } 100% { background-position:0% 50%; } }
 * { box-sizing:border-box; margin:0; padding:0; }
+html, body, #root { height:100%; }
+body { font-family:'Outfit',sans-serif; background:#F8F7FC; }
 ::-webkit-scrollbar { width:5px; }
 ::-webkit-scrollbar-thumb { background:#C7C4D4; border-radius:10px; }
 ::-webkit-scrollbar-track { background:transparent; }
@@ -197,7 +198,7 @@ function SubmitBanner({ onSubmit, submitted }) {
   );
 }
 
-export default function ZohoStartAgent() {
+export default function App() {
   const [messages, setMessages] = useState([WELCOME_MSG]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
